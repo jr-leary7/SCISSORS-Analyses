@@ -1,0 +1,1001 @@
+---
+title: "Reclustering PBMCs Using `SCISSORS`"
+subtitle: "Jack Leary"
+author: 
+  - "University of North Carolina at Chapel Hill - Lineberger Comprehensive Cancer Center"
+  - "University of Florida - Department of Biostatistics"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: paper
+    highlight: tango
+    df_print: kable
+    toc: true
+    toc_float: true
+    code_folding: show
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.align = "center")
+reticulate::use_virtualenv("~/Desktop/Python/science/venv/", required = TRUE)
+set.seed(629)  # lucky seed
+```
+
+# Introduction
+
+This document will serve as a tutorial for using `SCISSORS`, with the added functionality of detailing exactly how the PBMC3k dataset figures presented in our manuscript were generated. We'll start from a 10X counts matrix and end with fully annotated cell clusters. In addition to R, in order to run all the code in this document you'll need a Python 3 installation with `openTSNE` and all its dependencies installed.
+
+# Libraries
+
+## R
+
+```{r}
+library(dplyr)       # tidy data 
+library(Seurat)      # single cell infrastructure
+library(ggplot2)     # plots
+library(SCISSORS)    # reclustering  
+library(ggsignif)    # significance bars
+library(magrittr)    # assignment pipe
+library(paletteer)   # advanced colors
+library(latex2exp)   # LaTeX
+library(reticulate)  # Python interface
+library(SeuratData)  # PBMC3k dataset
+```
+
+## Python
+
+```{python}
+import numpy as np
+from openTSNE import TSNEEmbedding
+from openTSNE import initialization
+from openTSNE.affinity import Multiscale
+from openTSNE.affinity import PerplexityBasedNN
+```
+
+# Data
+
+We load a scRNA-seq dataset provided by 10X Genomics that consists of 2,700 peripheral blood mononuclear cells (PBMCs) from a healthy donor. We remove all cells with unique feature counts greater than 2,500 in order to prevent doublets/multiplets from being included in the dataset. 
+
+```{r}
+pbmc <- LoadData("pbmc3k")
+pbmc <- subset(pbmc, subset = nFeature_RNA < 2500)
+```
+
+# Preprocessing
+
+Here we use `PrepareData()` to normalize expression & select highly variable genes through `sctransform`, run PCA & t-SNE. and cluster our cells. We utilize 15 principal components even though [the Satija Lab vignette]((https://satijalab.org/seurat/v3.2/pbmc3k_tutorial.html)) used 10, as we're using `sctransform` normalization, which does a better job of retaining biological heterogeneity through normalization than standard log-normalization.
+
+```{r, warning=FALSE, message=FALSE}
+pbmc <- PrepareData(pbmc, 
+                    n.HVG = 4000, 
+                    regress.cc = FALSE, 
+                    regress.mt = FALSE, 
+                    n.PC = 15, 
+                    which.dim.reduc = "tsne",
+                    initial.resolution = .4, 
+                    random.seed = 629)
+```
+
+We see clear visual evidence of subclusters. 
+
+```{r}
+p0a <- DimPlot(pbmc, pt.size = 1.75, cols = paletteer_d("ggthemes::Classic_10")) + 
+       labs(x = "t-SNE 1", y = "t-SNE 2") + 
+       theme_yehlab() + 
+       guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p0a
+```
+
+We compute the distribution of the silhouette scores for each cluster. 
+
+```{r}
+sil_df <- ComputeSilhouetteScores(pbmc, avg = FALSE)
+p0b <- ggplot(sil_df, aes(x = Cluster, y = Score, fill = Cluster)) + 
+       geom_violin(draw_quantiles = 0.5, color = "black", scale = "width") + 
+       scale_fill_paletteer_d("ggthemes::Classic_10") + 
+       labs(y = "Silhouette Score", x = "Louvain Clusters", fill = NULL) + 
+       theme_minimal() + 
+       theme(panel.grid = element_blank(), 
+             panel.border = element_rect(fill = NA, size = 1), 
+             legend.position = "none", 
+             axis.ticks = element_line(), 
+             axis.title.x = element_text(size = 24), 
+             axis.title.y = element_text(size = 24), 
+             axis.text.x = element_text(size = 20),
+             axis.text.y = element_text(size = 20))
+```
+
+Clusters 0, 1, and 2 have statistically significantly lower silhouette scores than the other three clusters. We also see a small clump of cells in Cluster 4 that has lower scores than the rest of the cluster. We'll focus on these four clusters when reclustering, as clusters 3 and 5 seem mostly correct. 
+
+```{r}
+p0b
+```
+
+## Fit-SNE
+
+We'll also run the Fast Fourier Transform-accelerated version of t-SNE as implemented in the Python library `openTSNE`. First we'll need to get our PC matrix into a form accessible by our Python interpreter.
+
+```{r}
+pc_mat <- Embeddings(pbmc, reduction = "pca")
+```
+
+```{python}
+# import PC matrix
+pc_mat = np.array(r.pc_mat)
+# run Fit-SNE w/ multiscale kernel
+init = initialization.pca(pc_mat, random_state=629)
+affin_anneal = PerplexityBasedNN(pc_mat, perplexity=50, metric='cosine', random_state=629)
+tsne = TSNEEmbedding(init, affin_anneal, negative_gradient_method='fft')
+embed1 = tsne.optimize(n_iter=250, exaggeration=10, momentum=0.6)
+embed2 = embed1.optimize(n_iter=750, exaggeration=1, momentum=0.8)
+affin_anneal.set_perplexity(20)
+embed3 = embed2.optimize(n_iter=50, exaggeration=1, momentum=0.8)
+embed4 = embed3.optimize(n_iter=350)
+```
+
+Now we pull the results back into R, and save them in our `Seurat` object. We save the original embedding (made using the default Barnes-Hut approximate t-SNE implementation) in `pbmc@reduction$bh_tsne` - we need to do this in order to make the Fit-SNE embedding the default embedding that will be retrieved in calls to functions such as `DimPlot()` or `FeaturePlot()`. 
+
+```{r}
+embed <- as.matrix(py$embed4)
+rownames(embed) <- colnames(pbmc)
+colnames(embed) <- c("Fit-SNE_1", "Fit-SNE_2")
+pbmc@reductions$bh_tsne <- pbmc@reductions$tsne
+pbmc@reductions$tsne <- CreateDimReducObject(embeddings = embed, 
+                                             key = "FitSNE_", 
+                                             assay = "SCT", 
+                                             global = TRUE)
+```
+
+Visualizing the results shows pretty much the same global structure as with the default t-SNE implementation, albeit rotated a bit, but I like that Fit-SNE's clusters are a bit denser, so we'll use Fit-SNE going forward.
+
+```{r}
+p1 <- DimPlot(pbmc, pt.size = 1.75, cols = paletteer_d("ggthemes::Classic_10")) + 
+      labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+      theme_yehlab() + 
+      guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p1
+```
+
+## Broad Cell Types
+
+Next we'll run a differential expression test in order to assign general labels to our clusters. These identities will help guide our reclustering. 
+
+```{r}
+pbmc_de <- FindAllMarkers(pbmc, 
+                          logfc.threshold = .25, 
+                          test.use = "wilcox", 
+                          only.pos = TRUE, 
+                          random.seed = 629, 
+                          verbose = FALSE)
+pbmc_de %>% 
+  filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  slice_head(n = 5) -> top5_de
+```
+
+We'll also try using `FindSpecificMarkers()` to, of cours, find marker genes that are "specific" to each cluster by filtering the marker list for each cluster against a list of genes that are highly expressed in other clusters. 
+
+```{r}
+pbmc_de_specific <- FindSpecificMarkers(pbmc, log2fc.cutoff = .25, perc.cutoff = 0.95)
+pbmc_de_specific %>% 
+  group_by(cluster) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  slice_head(n = 5) -> top5_de_specific
+```
+
+From the top 5 differentially expressed genes for each cluster, we can deduce some basic cluster identities. Clusters 0 & 2 look like T cells. Clusters 1 & 4 appear to be monocytes. Cluster 3 strongly expresses B cell markers. Lastly, Cluster 5 is pretty clearly identifiable as being composed of NK cells. When we recluster our cells, we'll keep the biological context of these broad cell types in mind. 
+
+```{r, fig.width=6, fig.height=3}
+p2a <- DotPlot(pbmc, features = unique(top5_de$gene), dot.scale = 15) + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+       labs(color = "Expression", size = "% Expressed", y = "Cluster") + 
+       theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+             legend.position = "right", 
+             legend.justification = "center", 
+             panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+             axis.line = element_blank(), 
+             legend.title = element_text(size = 18), 
+             axis.title.x = element_blank(), 
+             axis.title.y = element_text(size = 20), 
+             axis.text.y = element_text(size = 18)) + 
+       guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+              size = guide_legend(title.position = "top", title.hjust = 0.5))
+p2a
+```
+
+We'll recreate the plot with the more specific marker genes for each cluster. 
+
+```{r, fig.width=5, fig.height=3}
+p2b <- DotPlot(pbmc, features = unique(top5_de_specific$gene), dot.scale = 15) + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+       labs(color = "Expression", size = "% Expressed", y = "Cluster") + 
+       theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+             legend.position = "right", 
+             legend.justification = "center", 
+             panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+             axis.line = element_blank(), 
+             legend.title = element_text(size = 18), 
+             axis.title.x = element_blank(), 
+             axis.title.y = element_text(size = 20), 
+             axis.text.y = element_text(size = 18)) + 
+       guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+              size = guide_legend(title.position = "top", title.hjust = 0.5))
+p2b
+```
+
+# Reclustering
+
+We'll run SCISSORS on the monocytes & T cells; i.e. on clusters 1 & 4 and 0 & 2. We use slightly different possible parameter sets as the T cell object is larger & less heterogeneous (see the differing variances of their respective silhouette scores above) than the monocyte object. 
+
+```{r, warning=FALSE, message=FALSE, results='hold'}
+mono_reclust <- ReclusterCells(pbmc, 
+                               which.clust = list(1, 4), 
+                               merge.clusters = TRUE, 
+                               n.HVG = 4000,
+                               n.PC = 15, 
+                               k.vals = c(10, 20, 30), 
+                               resolution.vals = c(.3, .4, .5), 
+                               redo.embedding = TRUE, 
+                               random.seed = 629)
+t_reclust <- ReclusterCells(pbmc, 
+                            which.clust = list(0, 2), 
+                            merge.clusters = TRUE, 
+                            n.HVG = 4000, 
+                            n.PC = 15, 
+                            k.vals = c(30, 40, 50), 
+                            resolution.vals = c(.3, .4, .5), 
+                            redo.embedding = TRUE, 
+                            random.seed = 629)
+```
+
+Now we'll run Fit-SNE on each of the reclustered objects for consistencies sake. First we'll need to create variables containing the PC matrices and send them to Python. 
+
+```{r}
+pc_mono <- Embeddings(mono_reclust, reduction = "pca")
+pc_t <- Embeddings(t_reclust, reduction = "pca")
+```
+
+We run Fit-SNE. 
+
+```{python}
+# import PC matrices
+pc_mono = np.array(r.pc_mono)
+pc_t = np.array(r.pc_t)
+
+# run Fit-SNE - Monocytes
+init_mono = initialization.pca(pc_mono, random_state=629)
+affin_anneal_mono = PerplexityBasedNN(pc_mono, perplexity=50, metric='cosine', random_state=629)
+tsne_mono = TSNEEmbedding(init_mono, affin_anneal_mono, negative_gradient_method='fft')
+embed1_mono = tsne_mono.optimize(n_iter=250, exaggeration=12, momentum=0.6)
+embed2_mono = embed1_mono.optimize(n_iter=950, exaggeration=1, momentum=0.8)
+
+# run Fit-SNE - T cells
+init_t = initialization.pca(pc_t, random_state=629)
+affin_anneal_t = PerplexityBasedNN(pc_t, perplexity=50, metric='cosine', random_state=629)
+tsne_t = TSNEEmbedding(init_t, affin_anneal_t, negative_gradient_method='fft')
+embed1_t = tsne_t.optimize(n_iter=250, exaggeration=12, momentum=0.6)
+embed2_t = embed1_t.optimize(n_iter=950, exaggeration=1, momentum=0.8)
+```
+
+Now we bring the results back in to R.
+
+```{r, warning=FALSE}
+embed_mono <- as.matrix(py$embed2_mono)
+rownames(embed_mono) <- colnames(mono_reclust)
+mono_reclust@reductions$bh_tsne <- mono_reclust@reductions$tsne
+mono_reclust@reductions$tsne <- CreateDimReducObject(embeddings = embed_mono, 
+                                                     key = "FitSNE_",
+                                                     assay = "SCT", 
+                                                     global = TRUE)
+embed_t <- as.matrix(py$embed2_t)
+rownames(embed_t) <- colnames(t_reclust)
+t_reclust@reductions$bh_tsne <- t_reclust@reductions$tsne
+t_reclust@reductions$tsne <- CreateDimReducObject(embeddings = embed_t,
+                                                  key = "FitSNE_",
+                                                  assay = "SCT",
+                                                  global = TRUE)
+```
+
+Here's what our reclusterings look like. There's clear visual separation between the main clusters and the subgroups we've discovered using `SCISSORS`.
+
+```{r}
+clust_colors <- paletteer_d("ggthemes::Classic_10")[c(4, 6, 2, 10, 5, 8, 9, 1, 7, 3)]
+p3 <- DimPlot(mono_reclust, pt.size = 1.75, cols = clust_colors[3:7]) + 
+      labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+      theme_yehlab() + 
+      guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p4 <- DimPlot(t_reclust, pt.size = 1.75, cols = clust_colors[c(8:10)]) + 
+      labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+      theme_yehlab() + 
+      guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p3
+p4
+```
+
+Next, we'll reintegrate our new clusters into our original `Seurat` object - this requires some finagling as `Seurat` is a bit weird with how it stores cell-level metadata. Since we had six clusters originally, and we discovered six new subclusters, we'll end up with twelve total clusters.
+
+```{r, message=FALSE}
+pbmc <- IntegrateSubclusters(original.object = pbmc, 
+                             reclust.results = list(mono_reclust, t_reclust))
+p5 <- DimPlot(pbmc, pt.size = 1.75, cols = clust_colors) + 
+      labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+      theme_yehlab() + 
+      guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p5
+```
+
+# Identify Cell Types
+
+Now that we've determined our subpopulations, we can assign cell types to each cluster using the marker genes provided in [the Satija Lab's PBMC3k vignette](https://satijalab.org/seurat/v3.2/pbmc3k_tutorial.html), as well as other canonical markers.
+
+## CD4+ T Cells
+
+We can quickly identify cluster 7 as the naive CD4+ T cells, and cluster 8 as the memory CD4+ population.
+
+```{r}
+p6 <- FeaturePlot(pbmc, pt.size = 1.75, features = "IL7R") + 
+      scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+      theme_yehlab() + 
+      NoLegend() + 
+      theme(axis.title = element_blank())
+p7 <- FeaturePlot(pbmc, pt.size = 1.75, features = "CCR7") + 
+      scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+      theme_yehlab()  + 
+      NoLegend() + 
+      theme(axis.title = element_blank())
+p8 <- FeaturePlot(pbmc, pt.size = 1.75, features = "S100A4") + 
+      scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+      theme_yehlab() + 
+      NoLegend() + 
+      theme(axis.title = element_blank())
+(p6 | p7 | p8) / p5
+```
+
+## CD14+ Monocytes
+
+Cluster 2 clearly houses our CD14+ monocytes.
+
+```{r}
+p9 <- FeaturePlot(pbmc, pt.size = 1.75, features = "CD14") + 
+      scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+      theme_yehlab() + 
+      NoLegend() + 
+      theme(axis.title = element_blank())
+p10 <- FeaturePlot(pbmc, pt.size = 1.75, features = "LYZ") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p9 | p10) / p5
+```
+
+## FCGR3A+ Monocytes
+
+The FCGR3A+ monocytes are positioned near the CD14+ monocytes in cluster 4. Note: these are also known as CD16+ monocytes. 
+
+```{r}
+p11 <- FeaturePlot(pbmc, pt.size = 1.75, features = "FCGR3A") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p12 <- FeaturePlot(pbmc, pt.size = 1.75, features = "MS4A7") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p11 | p12) / p5
+```
+
+## Intermediate Monocytes
+
+Lastly, it follows that between the CD14+ and FCGR3A+ monocytes are the intermediate monocytes, which [are characterized by expression of CD14 and CD16, along with S100A8, CD74, HLA-DPB1, etc ](https://www.frontiersin.org/articles/10.3389/fimmu.2019.02035/full#B3). 
+
+```{r}
+p13 <- FeaturePlot(pbmc, pt.size = 1.75, features = "HLA-DPB1") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p14 <- FeaturePlot(pbmc, pt.size = 1.75, features = "CD74") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p15 <- FeaturePlot(pbmc, pt.size = 1.75, features = "HLA-DRA") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p13 | p14 | p15) / p5
+```
+
+## B Cells
+
+Expression of MS4A1 allows us to isolate the B cells in cluster 0.
+
+```{r}
+p16 <- FeaturePlot(pbmc, pt.size = 1.75, features = "MS4A1") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p16 / p5
+```
+
+## CD8+ T Cells
+
+The canonical marker CD8A swiftly identifies our CD8+ T cells in cluster 9.
+
+```{r}
+p17 <- FeaturePlot(pbmc, pt.size = 1.75, features = "CD8A") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p17 / p5
+```
+
+## Natural Killer Cells
+
+We can use NKG7 and GNLY to isolate the NK cells in cluster 1.
+
+```{r}
+p18 <- FeaturePlot(pbmc, pt.size = 1.75, features = "NKG7") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p19 <- FeaturePlot(pbmc, pt.size = 1.75, features = "GNLY") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p18 | p19) / p5
+```
+
+## Dendritic Cells
+
+The dendritic cell group is defined by expression of FCER1A and CST3 in cluster 5.
+
+```{r}
+p20 <- FeaturePlot(pbmc, pt.size = 1.75, features = "FCER1A") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p21 <- FeaturePlot(pbmc, pt.size = 1.75, features = "CST3") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p20 | p21) / p5
+```
+
+## Platelets
+
+The tiny platelet population of `r sum(pbmc$seurat_clusters == 6)` cells can be identified by its expression of PPBP in cluster 6.
+
+```{r}
+p22 <- FeaturePlot(pbmc, pt.size = 1.75, features = "PPBP") + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p22 / p5
+```
+
+## Final Figure
+
+Finally, we'll add cell labels to our original `Seurat` object and plot the results.
+
+```{r}
+pbmc$label <- case_when(pbmc$seurat_clusters == 0 ~ "B", 
+                        pbmc$seurat_clusters == 1 ~ "NK", 
+                        pbmc$seurat_clusters == 2 ~ "Classical Monocyte", 
+                        pbmc$seurat_clusters == 3 ~ "Intermediate Monocyte", 
+                        pbmc$seurat_clusters == 4 ~ "Non-classical Monocyte", 
+                        pbmc$seurat_clusters == 5 ~ "DC", 
+                        pbmc$seurat_clusters == 6 ~ "Platelet", 
+                        pbmc$seurat_clusters == 7 ~ "Naive CD4+ T", 
+                        pbmc$seurat_clusters == 8 ~ "Memory CD4+ T", 
+                        pbmc$seurat_clusters == 9 ~ "CD8+ T")
+pbmc$label <- factor(pbmc$label, levels = c("B", "NK", "Classical Monocyte", "Intermediate Monocyte", 
+                                            "Non-classical Monocyte", "DC", "Platelet", "Naive CD4+ T", 
+                                            "Memory CD4+ T", "CD8+ T"))
+Idents(pbmc) <- "label"
+```
+
+We visualize the final cells labels for our 11 clusters.  
+
+```{r}
+p23 <- DimPlot(pbmc, pt.size = 1.75, cols = clust_colors) + 
+       theme_yehlab() + 
+       guides(color = guide_legend(nrow = 3, override.aes = list(size = 4))) + 
+       labs(x = "Fit-SNE 1", y = "Fit-SNE 2", title = NULL)
+p23
+```
+
+We perform a final differential expression analysis for our cell types. 
+
+```{r}
+final_de <- FindAllMarkers(pbmc, 
+                           logfc.threshold = .5, 
+                           test.use = "wilcox", 
+                           only.pos = TRUE, 
+                           verbose = FALSE, 
+                           random.seed = 629)
+final_de %>% 
+  filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC) -> top_de_final
+p24a <- DotPlot(pbmc, features = unique(top_de_final$gene), dot.scale = 15) + 
+        scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+        labs(color = "Expression", size = "% Expressed", y = NULL) + 
+        theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+              legend.position = "right", 
+              legend.justification = "center", 
+              panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+              axis.line = element_blank(), 
+              legend.title = element_text(size = 18), 
+              axis.title.x = element_blank(), 
+              axis.title.y = element_text(size = 20), 
+              axis.text.y = element_text(size = 18)) + 
+        guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+               size = guide_legend(title.position = "top", title.hjust = 0.5))
+```
+
+Our differential expression results confirm our manual annotations. Each of the celltypes expresses some of its canonical markers, so we can be pretty confident that we got the annotations right. 
+
+```{r, fig.width=12, fig.height=5}
+p24a
+```
+
+We'll repeat the plot, this time with our specific marker gene function. 
+
+```{r}
+final_de_specific <- FindSpecificMarkers(pbmc, ident.use = "label", perc.cutoff = 0.95)
+final_de_specific %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC) -> top_de_final_specific
+p24b <- DotPlot(pbmc, features = unique(top_de_final_specific$gene), dot.scale = 15) + 
+        scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+        labs(color = "Expression", size = "% Expressed", y = NULL) + 
+        theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+              legend.position = "right", 
+              legend.justification = "center", 
+              panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+              axis.line = element_blank(), 
+              legend.title = element_text(size = 18), 
+              axis.title.x = element_blank(), 
+              axis.title.y = element_text(size = 20), 
+              axis.text.y = element_text(size = 18)) + 
+        guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+               size = guide_legend(title.position = "top", title.hjust = 0.5))
+```
+
+```{r, fig.width=12.3, fig.height=5.2}
+p24b
+```
+
+Lastly, we'll put together some plots of [intermediate monocyte marker genes](https://doi.org/10.3389/fimmu.2019.01761) to really solidify our belief that we found a new cluster. 
+
+```{r}
+mono <- subset(pbmc, subset = seurat_clusters %in% c(2, 3, 4))  # just monocyte clusters
+p25a <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, HLA.DRA) %>% 
+        mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = HLA.DRA, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .14, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."))) + 
+        scale_y_continuous(limits = c(0, 5.1)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "HLA-DRA", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1),  
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+p25b <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, HLA.DRB1) %>% 
+       mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = HLA.DRB1, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .14, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."))) + 
+        scale_y_continuous(limits = c(0, 4.2)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "HLA-DRAB1", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1), 
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+p25c <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, HLA.DRB5) %>% 
+        mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = HLA.DRB5, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .14, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."))) + 
+        scale_y_continuous(limits = c(0, 3.85)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "HLA-DRAB5", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1), 
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+p25d <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, CD14) %>% 
+        mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = CD14, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .14, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."), 
+                                       c("CD14+ Mono.", "FCGR3A+ Mono."))) +
+        scale_y_continuous(limits = c(0, 3.4)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "CD14", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1),  
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+p25e <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, FCGR3A) %>% 
+        mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = FCGR3A, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .14, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."), 
+                                       c("CD14+ Mono.", "FCGR3A+ Mono."))) + 
+        scale_y_continuous(limits = c(0, 3.9)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "FCGR3A", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1), 
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+p25f <- data.frame(t(mono@assays$SCT@data)) %>% 
+        bind_cols((mono@meta.data %>% dplyr::select(label))) %>% 
+        dplyr::select(label, LYZ) %>% 
+        mutate(label = factor(case_when(label == "CD14+ Monocyte" ~ "CD14+ Mono.", 
+                                        label == "Intermediate Monocyte" ~ "Intermediate Mono.", 
+                                        TRUE ~ "FCGR3A+ Mono."),
+                              levels = c("CD14+ Mono.", "Intermediate Mono.", "FCGR3A+ Mono."))) %>% 
+        ggplot(aes(x = label, y = LYZ, fill = label)) + 
+        geom_violin(scale = "width", draw_quantiles = 0.5, size = 1.2) + 
+        geom_signif(test = wilcox.test, map_signif_level = TRUE, step_increase = .18, size = 1.2, textsize = 8, 
+                    comparisons = list(c("Intermediate Mono.", "CD14+ Mono."), 
+                                       c("Intermediate Mono.", "FCGR3A+ Mono."), 
+                                       c("CD14+ Mono.", "FCGR3A+ Mono."))) + 
+        scale_y_continuous(limits = c(0, 7.4)) + 
+        scale_fill_manual(values = clust_colors[3:5]) +
+        labs(y = "LYZ", x = NULL, fill = NULL) + 
+        theme_minimal() + 
+        theme(panel.grid = element_blank(), 
+              panel.border = element_rect(fill = NA, size = 1), 
+              legend.position = "none", 
+              axis.title.x = element_text(size = 24), 
+              axis.title.y = element_text(size = 28), 
+              axis.text.y = element_text(size = 20), 
+              axis.text.x = element_text(size = 20, angle = 60, vjust = 1, hjust = 1), 
+              axis.ticks = element_line(), 
+              plot.subtitle = element_text(face = "italic", size = 10))
+```
+
+Here's the final visualization of our monocyte markers. We can see that the intermediate monocyte cluster clearly has higher expression of HLA-DR than the other two monocyte celltypes. 
+
+```{r, fig.width=12, fig.height=6}
+p25g <- (p25f | p25d | p25e | p25a | p25b | p25c)
+p25g
+```
+
+We'll find specific marker genes for each of the subclusters now. First the monocytes: 
+
+```{r, fig.width=6, fig.height=3}
+mono_only <- subset(mono_reclust, subset = seurat_clusters %in% c(0:2))
+mono_only@meta.data$label <- case_when(mono_only$seurat_clusters == 0 ~ "Classical Monocyte", 
+                                       mono_only$seurat_clusters == 1 ~ "Intermediate Monocyte", 
+                                       TRUE ~ "Non-classical Monocyte")
+Idents(mono_only) <- "label"
+mono_markers <- FindAllMarkers(mono_only, 
+                               logfc.threshold = 0.25, 
+                               test.use = "wilcox", 
+                               only.pos = TRUE, 
+                               verbose = FALSE, 
+                               random.seed = 312) %>% 
+                filter(p_val_adj < 0.05)
+# determine highly expressed genes in other celltypes 
+gene_means_by_clust <- t(pbmc@assays$SCT@data) %>% 
+                       as.data.frame() %>% 
+                       mutate(clust = pbmc$label) %>% 
+                       group_by(clust) %>% 
+                       summarise(across(where(is.numeric), mean))
+# find list of genes w/ mean expression above 90th percentile of expression in each celltype
+high_exp_genes_non_mono <- c()
+loop_celltypes <- unname(gene_means_by_clust$clust[!gene_means_by_clust$clust %in% c("Classical Monocyte", 
+                                                                                     "Intermediate Monocyte", 
+                                                                                     "Non-classical Monocyte")])
+for (i in loop_celltypes) {
+  top_exp_genes <- gene_means_by_clust %>% 
+                   filter(clust == i) %>% 
+                   dplyr::select(-clust) %>% 
+                   t() %>% 
+                   as.data.frame() %>% 
+                   filter(V1 > quantile(V1, .95)) %>% 
+                   mutate(gene = rownames(.)) %>% 
+                   pull(gene)
+  high_exp_genes_non_mono <- c(high_exp_genes_non_mono, top_exp_genes)
+}
+high_exp_genes_non_mono <- unique(high_exp_genes_non_mono)
+mono_markers %<>% filter(!gene %in% high_exp_genes_non_mono)
+mono_markers %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  group_by(cluster) %>% 
+  slice_head(n = 5) -> top5_mono_markers
+
+p26a <- DotPlot(mono_only, features = unique(top5_mono_markers$gene), dot.scale = 15) + 
+        scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+        labs(color = "Expression", size = "% Expressed", y = NULL) + 
+        theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+              legend.position = "right", 
+              legend.justification = "center", 
+              panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+              axis.line = element_blank(), 
+              legend.title = element_text(size = 18), 
+              axis.title.x = element_blank(), 
+              axis.title.y = element_text(size = 20), 
+              axis.text.y = element_text(size = 18)) + 
+        guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+               size = guide_legend(title.position = "top", title.hjust = 0.5))
+p26a
+```
+
+We'll also add in the dendritic cells and platelets. 
+
+```{r, fig.width=5, fig.height=3.25}
+mono_reclust@meta.data$label <- case_when(mono_reclust@meta.data$seurat_clusters == 0 ~ "Classical Monocyte", 
+                                          mono_reclust@meta.data$seurat_clusters == 1 ~ "Intermediate Monocyte", 
+                                          mono_reclust@meta.data$seurat_clusters == 2 ~ "Non-classical Monocyte", 
+                                          mono_reclust@meta.data$seurat_clusters == 3 ~ "DC", 
+                                          mono_reclust@meta.data$seurat_clusters == 4 ~ "Platelet")
+Idents(mono_reclust) <- "label"
+myeloid_markers_final_top5 <- top5_mono_markers %>% 
+                              bind_rows((top_de_final_specific %>% filter(cluster == "DC")),
+                                        (top_de_final_specific %>% filter(cluster == "Platelet")))
+fibro_markers_specific_top5 %>% filter(cluster == "Endothelial") %>% 
+  bind_rows((caf_markers_final_top5 %>% filter(cluster == "myCAF")), 
+            (fibro_markers_specific_top5 %>% filter(cluster == "Perivascular")), 
+            (caf_markers_final_top5 %>% filter(cluster == "iCAF")), 
+            (caf_markers_final_top5 %>% filter(cluster == "apCAF"))) %>% 
+  mutate(source = case_when(source = is.na(source) ~ "Stroma", TRUE ~ source), 
+                            log2FC_cutoff = case_when(is.na(log2FC_cutoff) ~ 0.25, TRUE ~ log2FC_cutoff)) -> fibro_markers_combo_top5
+p26b <- DotPlot(mono_reclust, features = unique(myeloid_markers_final_top5$gene), dot.scale = 15) + 
+        scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+        labs(color = "Expression", size = "% Expressed", y = NULL) + 
+        theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+              legend.position = "right", legend.justification = "center", 
+              panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+              axis.line = element_blank(), 
+              legend.title = element_text(size = 18), 
+              axis.title.x = element_blank(), 
+              axis.title.y = element_blank(), 
+              axis.text.y = element_text(size = 18)) + 
+        guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+               size = guide_legend(title.position = "top", title.hjust = 0.5))
+p26b
+```
+
+We'll repeat the process for the T cells. 
+
+```{r}
+t_reclust@meta.data$label <- case_when(t_reclust$seurat_clusters == 0 ~ "Naive CD4+ T", 
+                                       t_reclust$seurat_clusters == 1 ~ "Memory CD4+ T", 
+                                       TRUE ~ "CD8+ T")
+Idents(t_reclust) <- "label"
+t_markers <- FindAllMarkers(t_reclust, 
+                            logfc.threshold = 0.25, 
+                            test.use = "wilcox", 
+                            only.pos = TRUE, 
+                            verbose = FALSE, 
+                            random.seed = 312) %>% 
+             filter(p_val_adj < 0.05)
+# find list of genes w/ mean expression above 90th percentile of expression in each celltype
+high_exp_genes_non_t <- c()
+loop_celltypes <- unname(gene_means_by_clust$clust[!gene_means_by_clust$clust %in% c("Naive CD4+ T", 
+                                                                                     "Memory CD4+ T", 
+                                                                                     "CD8+ T")])
+for (i in loop_celltypes) {
+  top_exp_genes <- gene_means_by_clust %>% 
+                   filter(clust == i) %>% 
+                   dplyr::select(-clust) %>% 
+                   t() %>% 
+                   as.data.frame() %>% 
+                   filter(V1 > quantile(V1, .95)) %>% 
+                   mutate(gene = rownames(.)) %>% 
+                   pull(gene)
+  high_exp_genes_non_t <- c(high_exp_genes_non_t, top_exp_genes)
+}
+high_exp_genes_non_t <- unique(high_exp_genes_non_t)
+t_markers %<>% filter(!gene %in% high_exp_genes_non_t)
+t_markers %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  group_by(cluster) %>% 
+  slice_head(n = 5) -> top5_t_markers
+p27 <- DotPlot(t_reclust, features = unique(top5_t_markers$gene), dot.scale = 15) + 
+       scale_color_gradientn(colors = paletteer_d("wesanderson::Zissou1")) +
+       labs(color = "Expression", size = "% Expressed", y = NULL) + 
+       theme(axis.text.x = element_text(angle = 90, size = 16, vjust = 0.5), 
+             legend.position = "right", 
+             legend.justification = "center", 
+             panel.border = element_rect(fill = NA, size = 1, color = "black"), 
+             axis.line = element_blank(), 
+             legend.title = element_text(size = 18), 
+             axis.title.x = element_blank(), 
+             axis.title.y = element_text(size = 20), 
+             axis.text.y = element_text(size = 18)) + 
+       guides(color = guide_colorbar(title.position = "top", barheight = unit(3, units = "cm"), title.hjust = 0.5), 
+              size = guide_legend(title.position = "top", title.hjust = 0.5))
+p27
+```
+
+# Conclusions
+
+SCISSORS automatically split a large CD4+ T cluster into naive and memory CD4+ T cells. It successfully separated a small dendritic cell cluster from the CD14+ monocytes it had originally been grouped with, and teased out the intermediate monocyte population nestled between the CD14+ and CD16+ monocyte clusters. Lastly, it identified a tiny platelet cluster that had been erroneously grouped with the CD16+ monocytes. The intermediate monocytes were not annotated in [the original Satija Lab PBMC3k vignette](https://satijalab.org/seurat/v3.2/pbmc3k_tutorial.html). 
+
+We used the PBMC3k dataset because of 1) its immediate availability to anyone wishing to replicate our results and 2) the validity of its annotations, which allowed us to be confident in the results from SCISSORS, which was able to carve out rare cell groups from larger, broader cell types. In this case, the dendritic cell cluster was composed of 37 cells, and the platelet cluster of just 14 cells. However, SCISSORS isn't just useful for rare cell types: it also identified the intermediate monocytes, a cluster of 191 cells. We thus believe we can confidently say that SCISSORS has been shown to accurately and swiftly identify cell types, both common and rare, by considering the variance in gene expression within clusters and judging iterative reclustering using silhouette scores. We put forth that this approach is theoretically advantageous for identifying rare cell populations, rather than attempting to do so at the level of the entire dataset.
+
+# Save Data & Figures
+
+This part isn't really worth reading; it's just here to prove that all the figures were actually dynamically generated and saved upon knitting this document.
+
+First we save the finalized `Seurat` object. 
+
+```{r}
+saveRDS(pbmc, file = "~/Desktop/Data/pbmc3k.Rds")
+```
+
+We'll also save the final DE genes as an Excel spreadsheet. 
+
+```{r}
+final_de %>% 
+  mutate(log2fc_cutoff = 0.5) %>% 
+  openxlsx::write.xlsx(file = "~/Desktop/Data/PBMC_DE.xlsx", overwrite = TRUE)
+final_de_specific %>% 
+  mutate(log2fc_cutoff = 0.25) %>% 
+  openxlsx::write.xlsx(file = "~/Desktop/Data/PBMC_DE_Specific.xlsx", overwrite = TRUE)
+```
+
+We'll create a quick convenience function to help us save the figures.
+
+```{r}
+SaveFigure <- function(my.plot = NULL, name = NULL, height = 8, width = 8) {
+  if (is.null(plot) | is.null(name)) stop("You forgot some arguments.")
+  # save figure as is - w/ axis labels, titles, etc. 
+  dir <- "~/Desktop/R/SCISSORS/vignettes/figures_supp/PBMC"
+  ggsave(my.plot, 
+         filename = paste0(name, ".pdf"), 
+         device = "pdf", 
+         units = "in",
+         path = dir, 
+         height = height, 
+         width = width) 
+  # save "blank" figure w/ no labels, legends, etc.
+  dir <- "~/Desktop/R/SCISSORS/vignettes/figures_pub/PBMC"
+  plot_blank <- my.plot + 
+                theme(axis.title = element_blank(), 
+                      panel.border = element_blank(), 
+                      plot.title = element_blank(), 
+                      plot.subtitle = element_blank(), 
+                      legend.position = "none")
+  ggsave(plot_blank, 
+         filename = paste0(name, ".pdf"), 
+         device = "pdf", 
+         units = "in",
+         path = dir, 
+         height = height, 
+         width = width) 
+}
+```
+
+Lastly, we'll save the figures under `./vignettes/figures/`. 
+
+```{r}
+SaveFigure(p0a, name = "Seurat_Clusters")
+SaveFigure(p0b, name = "Seurat_Clusters_Silhouettes")
+SaveFigure(p1, name = "Seurat_Clusters_FitSNE")
+SaveFigure(p2a, name = "Marker_Genes_For_Seurat_Clusters", height = 5, width = 12)
+SaveFigure(p2b, name = "Marker_Genes_For_Seurat_Clusters_Specific", height = 5, width = 12)
+SaveFigure(p3, name = "Monocyte_Cluster_SCISSORS")
+SaveFigure(p4, name = "T_Cluster_SCISSORS")
+SaveFigure(p5, name = "SCISSORS_Clusters_Final")
+SaveFigure(p6, name = "CD4T_IL7R")
+SaveFigure(p7, name = "CD4T_CCR7")
+SaveFigure(p8, name = "CD4T_S100A4")
+SaveFigure(p9, name = "Monocyte_CD14")
+SaveFigure(p10, name = "Monocyte_LYZ")
+SaveFigure(p11, name = "FCGR3A_Monocyte_FCGR3A")
+SaveFigure(p12, name = "FCGR3A_Monocyte_MS4A7")
+SaveFigure(p13, name = "Intermediate_Mono_HLADPB1")
+SaveFigure(p14, name = "Intermediate_Mono_CD74")
+SaveFigure(p15, name = "Intermediate_Mono_HLADRA")
+SaveFigure(p16, name = "B_MS4A1")
+SaveFigure(p17, name = "CD8T_CD8A")
+SaveFigure(p18, name = "NK_NKG7")
+SaveFigure(p19, name = "NK_GNLY")
+SaveFigure(p20, name = "DC_FCER1A")
+SaveFigure(p21, name = "DC_CST3")
+SaveFigure(p22, name = "Platelet_PPBP")
+SaveFigure(p23, name = "SCISSORS_Celltypes_Final")
+SaveFigure(p24a, name = "Marker_Genes_For_SCISSORS_Celltypes", height = 8, width = 18)
+SaveFigure(p24b, name = "Marker_Genes_For_SCISSORS_Celltypes_Specific", height = 8, width = 18)
+SaveFigure(p25g, name = "Intermediate_Mono_Marker_Violins", height = 6, width = 15)
+SaveFigure(p26a, name = "Monocyte_Cluster_SCISSORS_Dotplot_Specific", height = 5, width = 8)
+SaveFigure(p26b, name = "Monocyte_Cluster_SCISSORS_Dotplot_Specific_Combo", height = 5.75, width = 9.25)
+SaveFigure(p27, name = "T_Cluster_SCISSORS_Dotplot_Specific", height = 4.75, width = 7.5)
+```
+
+And of course:
+
+```{r}
+sessionInfo()
+```
