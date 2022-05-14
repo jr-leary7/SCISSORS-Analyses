@@ -1880,12 +1880,38 @@ p94
 We'll add final celltype labels to all cluster in the full `Seurat` object. 
 
 ```{r}
+# ductal 
 basal_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Basal-like"]
 classical1_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Classical 1"]
 classical2_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Classical 2"]
+# fibro 
 icaf_cells <- rownames(caf@meta.data)[caf@meta.data$label == "iCAF"]
 mycaf_cells <- rownames(caf@meta.data)[caf@meta.data$label == "myCAF"]
 apcaf_cells <- rownames(caf@meta.data)[caf@meta.data$label == "apCAF"]
+# NK / T
+cd4t_cells <- c(rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "CD4+ T"], 
+                rownames(nkt_norm@meta.data)[nkt_norm@meta.data$label == "CD4+ T"])
+cd8t_cells <- c(rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "CD8+ T"], 
+                rownames(nkt_norm@meta.data)[nkt_norm@meta.data$label == "CD8+ T"])
+nk_cells <- c(rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "NK"], 
+                rownames(nkt_norm@meta.data)[nkt_norm@meta.data$label == "NK"])
+treg_cells <- c(rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "T-reg"], 
+                rownames(nkt_norm@meta.data)[nkt_norm@meta.data$label == "T-reg"])
+prolif_treg_cells <- c(rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "Proliferating T-reg"], 
+                       rownames(nkt_norm@meta.data)[nkt_norm@meta.data$label == "Proliferating T-reg"])
+mast_cells <- rownames(nkt_tumor@meta.data)[nkt_tumor@meta.data$label == "Mast"]
+# myeloid 
+res_macro_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "Resident Macrophage"], 
+                     rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "Resident Macrophage"])
+classic_mono_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "Classical Monocyte"], 
+                        rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "Classical Monocyte"])
+non_classic_mono_cells <- rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "Non-classical Monocyte"]
+alt_macro_cells <- rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "Alternatively-activated Macrophage"]
+neutrophil_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "Neutrophil"], 
+                      rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "Neutrophil"])
+dc_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "DC"], 
+              rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "DC"])
+
 pdac@meta.data %<>% mutate(label_broad = case_when(seurat_clusters == 0 ~ "Macrophage", 
                                                    seurat_clusters == 1 ~ "NK", 
                                                    seurat_clusters == 2 ~ "Monocyte", 
@@ -1898,13 +1924,34 @@ pdac@meta.data %<>% mutate(label_broad = case_when(seurat_clusters == 0 ~ "Macro
                                                    seurat_clusters == 9 ~ "Acinar", 
                                                    seurat_clusters == 10 ~ "Normal Stroma", 
                                                    seurat_clusters == 11 ~ "Plasma", 
-                                                   seurat_clusters == 12 ~ "pDC") ,
-                             label_fine = case_when(rownames(.) %in% basal_cells ~ "Basal-like PDAC", 
+                                                   seurat_clusters == 12 ~ "pDC"),
+                           # used previously to generate ref. pop. for filtering for CAFs / PDAC cells
+                           label_fine_old = case_when(rownames(.) %in% basal_cells ~ "Basal-like PDAC", 
+                                                      rownames(.) %in% classical1_cells ~ "Classical PDAC 1", 
+                                                      rownames(.) %in% classical2_cells ~ "Classical PDAC 2", 
+                                                      rownames(.) %in% icaf_cells ~ "iCAF", 
+                                                      rownames(.) %in% mycaf_cells ~ "myCAF", 
+                                                      rownames(.) %in% apcaf_cells ~ "apCAF", 
+                                                      TRUE ~ label_broad), 
+                           # mroe accurate ref. pop. now that I've annotated the immune cells
+                           label_fine = case_when(rownames(.) %in% basal_cells ~ "Basal-like PDAC", 
                                                     rownames(.) %in% classical1_cells ~ "Classical PDAC 1", 
                                                     rownames(.) %in% classical2_cells ~ "Classical PDAC 2", 
                                                     rownames(.) %in% icaf_cells ~ "iCAF", 
                                                     rownames(.) %in% mycaf_cells ~ "myCAF", 
                                                     rownames(.) %in% apcaf_cells ~ "apCAF", 
+                                                    rownames(.) %in% cd4t_cells ~ "CD4+ T",
+                                                    rownames(.) %in% cd8t_cells ~ "CD8+ T", 
+                                                    rownames(.) %in% nk_cells ~ "NK", 
+                                                    rownames(.) %in% treg_cells ~ "T-reg", 
+                                                    rownames(.) %in% prolif_treg_cells ~ "Proliferating T-reg", 
+                                                    rownames(.) %in% mast_cells ~ "Mast", 
+                                                    rownames(.) %in% res_macro_cells ~ "Resident Macrophage",
+                                                    rownames(.) %in% classic_mono_cells ~ "Classical Monocyte",
+                                                    rownames(.) %in% non_classic_mono_cells ~ "Non-classical Monocyte",
+                                                    rownames(.) %in% alt_macro_cells ~ "Alternatively-activated Macrophage",
+                                                    rownames(.) %in% neutrophil_cells ~ "Neutrophil",
+                                                    rownames(.) %in% dc_cells ~ "DC", 
                                                     TRUE ~ label_broad))
 Idents(pdac) <- "label_fine"
 ```
