@@ -1579,15 +1579,6 @@ myo_tumor <- ReclusterCells(subset(pdac, subset = condition == "PDAC"),
                            redo.embedding = TRUE, 
                            random.seed = 629)
 myo_tumor_pc <- Embeddings(myo_tumor, reduction = "pca")
-myo_tumor_mx <- FindAllMarkers(myo_tumor, logfc.threshold = 0.5, test.use = "wilcox", only.pos = TRUE)
-myo_tumor_mx %>% with_groups(cluster, slice_head, n = 8) %>% View()
-myo_tumor_mx %>% filter(cluster == 7) %>% View()
-DimPlot(myo_tumor)
-DimPlot(myo_tumor, group.by = "sample")
-FeaturePlot(myo_tumor, features = "TYMS")  # unknown
-FeaturePlot(pdac, "PCLAF")
-FeaturePlot(myo_tumor, features = "PCLAF") # unknown
-FeaturePlot(myo_tumor, features = "TOP2A") # unknown
 ```
 
 We'll run Fit-SNE on the reclustered cells. 
@@ -1608,7 +1599,7 @@ We pull the results into R, making sure to save the Barnes-Hut t-SNE results in 
 ```{r}
 embed_myo_tumor <- as.matrix(py$embed_myo_tumor2)
 rownames(embed_myo_tumor) <- colnames(myo_tumor)
-# myo_tumor@reductions$bh_tsne <- myo_tumor@reductions$tsne
+myo_tumor@reductions$bh_tsne <- myo_tumor@reductions$tsne
 myo_tumor@reductions$tsne <- CreateDimReducObject(embeddings = embed_myo_tumor, 
                                                   key = "FitSNE_", 
                                                   assay = "SCT", 
@@ -1626,7 +1617,7 @@ p72
 
 ##### Resident & Alternatively-activated Macrophages
 
-The resident macrophages can be found in cluster 0, and the alternatively-activated ones in cluster 2. 
+The resident macrophages can be found in clusters 0 & 7, and the alternatively-activated ones in cluster 2. 
 
 ```{r}
 p73 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "APOE", pt.size = 1.5) + 
@@ -1639,7 +1630,12 @@ p74 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "C1QA", pt.size = 1
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-(p73 | p74) / p72
+p75 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "CD68", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p73 | p74 | p75) / p72
 ```
 
 
@@ -1648,22 +1644,22 @@ p74 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "C1QA", pt.size = 1
 High expression of LYZ and present (but lower than that found in resident macrophages) expression of CD14 reveals the classical monocytes in cluster 1. FCGR3A (aka CD16) shows the CD16+ monocytes in cluster 6. 
 
 ```{r}
-p75 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "LYZ", pt.size = 1.5) + 
+p76 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "LYZ", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-p76 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "CD14", pt.size = 1.5) + 
+p77 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "CD14", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-p77 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "FCGR3A", pt.size = 1.5) + 
+p78 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "FCGR3A", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-(p75 | p76 | p77) / p72
+(p76 | p77 | p78) / p72
 ```
 
 ##### Neutrophil 
@@ -1671,17 +1667,17 @@ p77 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "FCGR3A", pt.size =
 High expression of S100A8 & S100A9 identify the neutrophils in cluster 3. 
 
 ```{r}
-p78 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "S100A8", pt.size = 1.5) + 
+p79 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "S100A8", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-p79 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "S100A9", pt.size = 1.5) + 
+p80 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "S100A9", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-(p78 | p79) / p72
+(p79 | p80) / p72
 ```
 
 ##### Dendritic Cells
@@ -1689,35 +1685,194 @@ p79 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "S100A9", pt.size =
 We can identify dendritic cells in clusters 4 & 5 using the canonical markers FCER1A and CLEC10A. 
 
 ```{r}
-p80 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "FCER1A", pt.size = 1.5) + 
+p81 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "FCER1A", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-p81 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "CLEC10A", pt.size = 1.5) + 
+p82 <- FeaturePlot(myo_tumor, reduction = "tsne", features = "CLEC10A", pt.size = 1.5) + 
        scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
        theme_yehlab() + 
        NoLegend() + 
        theme(axis.title = element_blank())
-(p80 | p81) / p72
+(p81 | p82) / p72
 ```
 
+We can now add celltype labels to each of the clusters. 
 
-
-
-
+```{r}
+myo_tumor@meta.data %<>% mutate(label = case_when(seurat_clusters == 0 ~ "Resident Macrophage", 
+                                                  seurat_clusters == 1 ~ "Classical Monocyte", 
+                                                  seurat_clusters == 2 ~ "Alternatively-activated Monocyte", 
+                                                  seurat_clusters == 3 ~ "Neutrophil", 
+                                                  seurat_clusters == 4 ~ "DC", 
+                                                  seurat_clusters == 5 ~ "DC", 
+                                                  seurat_clusters == 6 ~ "Non-classical Monocyte", 
+                                                  seurat_clusters == 7 ~ "Resident Macrophage"))
+Idents(myo_tumor) <- "label"
+p83 <- DimPlot(myo_tumor, reduction = "tsne", pt.size = 1.5) + 
+       scale_color_paletteer_d("ggsci::default_jama") + 
+       labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+       theme_yehlab() + 
+       theme(plot.title = element_blank()) + 
+       guides(color = guide_legend(nrow = 2, override.aes = list(size = 4)))
+p83
+```
 
 ### Adjacent Normal
 
 #### Recluster Myeloid Cells 
 
+```{r}
+myo_norm <- ReclusterCells(subset(pdac, subset = condition == "AdjNorm"), 
+                           which.clust = c(0, 2, 6), 
+                           merge.clusters = TRUE, 
+                           n.HVG = 4000, 
+                           n.PC = 10, 
+                           k.vals = c(20, 30, 40, 50), 
+                           resolution.vals = c(.2, .3, .4), 
+                           nn.metric = "cosine", 
+                           redo.embedding = TRUE, 
+                           random.seed = 629)
+myo_norm_pc <- Embeddings(myo_norm, reduction = "pca")
+DimPlot(myo_norm)
+FeaturePlot(myo_norm, features = "LYZ")
+FeaturePlot(myo_norm, features = "FCGR3A")
+FeaturePlot(myo_norm, features = "CD14")
+VlnPlot(myo_norm, features = "LYZ")
+VlnPlot(myo_norm, features = "FCGR3A")
+VlnPlot(myo_norm, features = "CD14")
+VlnPlot(myo_norm, features = "S100A8")
+VlnPlot(myo_norm, features = "S100A9")
+```
+
+We'll run Fit-SNE on the reclustered cells. 
+
+```{python}
+# import data
+myo_norm_pc = r.myo_norm_pc
+# run Fit-SNE
+affin_myo_norm = PerplexityBasedNN(myo_norm_pc, perplexity=30, random_state=629)
+init = initialization.pca(myo_norm_pc, random_state=629)
+tsne_myo_norm = TSNEEmbedding(init, affin_myo_norm, negative_gradient_method='fft')
+embed_myo_norm1 = tsne_myo_norm.optimize(n_iter=250, exaggeration=12, momentum=0.6)
+embed_myo_norm2 = embed_myo_norm1.optimize(n_iter=750, exaggeration=1, momentum=0.4)
+```
+
+We pull the results into R, making sure to save the Barnes-Hut t-SNE results in another reduction slot.
+
+```{r}
+embed_myo_norm <- as.matrix(py$embed_myo_norm2)
+rownames(embed_myo_norm) <- colnames(myo_norm)
+# myo_norm@reductions$bh_tsne <- myo_norm@reductions$tsne
+myo_norm@reductions$tsne <- CreateDimReducObject(embeddings = embed_myo_norm, 
+                                                 key = "FitSNE_", 
+                                                 assay = "SCT", 
+                                                 global = TRUE)
+p84 <- DimPlot(myo_norm, reduction = "tsne", pt.size = 1.5) + 
+       scale_color_manual(values = paletteer_d("ggsci::default_nejm")) + 
+       labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+       theme_yehlab() + 
+       guides(color = guide_legend(nrow = 1, override.aes = list(size = 4)))
+p84
+```
+
 #### Cell Type Identification 
 
+##### Resident Macrophages 
 
+We can identify resident macrophages in cluster 0 using C1QA and APOE. 
 
+```{r}
+p85 <- FeaturePlot(myo_norm, reduction = "tsne", features = "C1QA", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p86 <- FeaturePlot(myo_norm, reduction = "tsne", features = "APOE", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p85 | p86) / p84
+```
 
+##### Dendritic Cells
 
+The DCs in cluster 2 can be found through their expression of FCER1A and CLEC10A. 
 
+```{r}
+p87 <- FeaturePlot(myo_norm, reduction = "tsne", features = "CLEC10A", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p88 <- FeaturePlot(myo_norm, reduction = "tsne", features = "FCER1A", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p87 | p88) / p84
+```
+
+##### Neutrophils
+
+Next, high S100A8 and S100A9 show us the neutrophils in cluster 3. 
+
+```{r}
+p89 <- FeaturePlot(myo_norm, reduction = "tsne", features = "S100A8", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p90 <- FeaturePlot(myo_norm, reduction = "tsne", features = "S100A9", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p89 | p90) / p84
+```
+
+##### Classical Monocytes 
+
+Lastly, joint expression of CD14, LYZ, and FCGR3A (aka CD16) reveal the classical monocytes in clusters 1 & 4. 
+
+```{r}
+p91 <- FeaturePlot(myo_norm, reduction = "tsne", features = "CD14", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p92 <- FeaturePlot(myo_norm, reduction = "tsne", features = "FCGR3A", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+p93 <- FeaturePlot(myo_norm, reduction = "tsne", features = "LYZ", pt.size = 1.5) + 
+       scale_color_gradientn(colors = wesanderson::wes_palette("Zissou1")) + 
+       theme_yehlab() + 
+       NoLegend() + 
+       theme(axis.title = element_blank())
+(p91 | p92 | p93) / p84
+```
+
+Now we can add celltype identities to the object's metadata. 
+
+```{r}
+myo_norm@meta.data %<>% mutate(label = case_when(seurat_clusters == 0 ~ "Resident Macrophage", 
+                                                 seurat_clusters == 1 ~ "Classical Monocyte", 
+                                                 seurat_clusters == 2 ~ "DC", 
+                                                 seurat_clusters == 3 ~ "Neutrophil", 
+                                                 seurat_clusters == 4 ~ "Classical Monocyte"))
+Idents(myo_norm) <- "label"
+p94 <- DimPlot(myo_norm, reduction = "tsne", pt.size = 1.5) + 
+       scale_color_paletteer_d("ggsci::default_jama") + 
+       labs(x = "Fit-SNE 1", y = "Fit-SNE 2") + 
+       theme_yehlab() + 
+       theme(plot.title = element_blank()) + 
+       guides(color = guide_legend(nrow = 2, override.aes = list(size = 4)))
+p94
+```
 
 
 # Identify Marker Genes
