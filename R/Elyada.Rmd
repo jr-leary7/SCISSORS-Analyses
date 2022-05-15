@@ -1735,15 +1735,6 @@ myo_norm <- ReclusterCells(subset(pdac, subset = condition == "AdjNorm"),
                            redo.embedding = TRUE, 
                            random.seed = 629)
 myo_norm_pc <- Embeddings(myo_norm, reduction = "pca")
-DimPlot(myo_norm)
-FeaturePlot(myo_norm, features = "LYZ")
-FeaturePlot(myo_norm, features = "FCGR3A")
-FeaturePlot(myo_norm, features = "CD14")
-VlnPlot(myo_norm, features = "LYZ")
-VlnPlot(myo_norm, features = "FCGR3A")
-VlnPlot(myo_norm, features = "CD14")
-VlnPlot(myo_norm, features = "S100A8")
-VlnPlot(myo_norm, features = "S100A9")
 ```
 
 We'll run Fit-SNE on the reclustered cells. 
@@ -1764,7 +1755,7 @@ We pull the results into R, making sure to save the Barnes-Hut t-SNE results in 
 ```{r}
 embed_myo_norm <- as.matrix(py$embed_myo_norm2)
 rownames(embed_myo_norm) <- colnames(myo_norm)
-# myo_norm@reductions$bh_tsne <- myo_norm@reductions$tsne
+myo_norm@reductions$bh_tsne <- myo_norm@reductions$tsne
 myo_norm@reductions$tsne <- CreateDimReducObject(embeddings = embed_myo_norm, 
                                                  key = "FitSNE_", 
                                                  assay = "SCT", 
@@ -1884,6 +1875,9 @@ We'll add final celltype labels to all cluster in the full `Seurat` object.
 basal_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Basal-like"]
 classical1_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Classical 1"]
 classical2_cells <- rownames(pdac_ductal@meta.data)[pdac_ductal@meta.data$label == "Classical 2"]
+lipid_proc_cells <- rownames(ductal@meta.data)[ductal@meta.data$label == "Lipid Proc."]
+secretory_cells <- rownames(ductal@meta.data)[ductal@meta.data$label == "Secretory"]
+acinar_cells <- rownames(ductal@meta.data)[ductal@meta.data$label == "Acinar"]
 # fibro 
 icaf_cells <- rownames(caf@meta.data)[caf@meta.data$label == "iCAF"]
 mycaf_cells <- rownames(caf@meta.data)[caf@meta.data$label == "myCAF"]
@@ -1911,7 +1905,6 @@ neutrophil_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label ==
                       rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "Neutrophil"])
 dc_cells <- c(rownames(myo_tumor@meta.data)[myo_tumor@meta.data$label == "DC"], 
               rownames(myo_norm@meta.data)[myo_norm@meta.data$label == "DC"])
-
 pdac@meta.data %<>% mutate(label_broad = case_when(seurat_clusters == 0 ~ "Macrophage", 
                                                    seurat_clusters == 1 ~ "NK", 
                                                    seurat_clusters == 2 ~ "Monocyte", 
@@ -1933,10 +1926,13 @@ pdac@meta.data %<>% mutate(label_broad = case_when(seurat_clusters == 0 ~ "Macro
                                                       rownames(.) %in% mycaf_cells ~ "myCAF", 
                                                       rownames(.) %in% apcaf_cells ~ "apCAF", 
                                                       TRUE ~ label_broad), 
-                           # mroe accurate ref. pop. now that I've annotated the immune cells
+                           # more accurate ref. pop. now that I've annotated the immune cells
                            label_fine = case_when(rownames(.) %in% basal_cells ~ "Basal-like PDAC", 
                                                     rownames(.) %in% classical1_cells ~ "Classical PDAC 1", 
                                                     rownames(.) %in% classical2_cells ~ "Classical PDAC 2", 
+                                                    rownames(.) %in% lipid_proc_cells ~ "Lipid Proc.", 
+                                                    rownames(.) %in% secretory_cells ~ "Secretory", 
+                                                    rownames(.) %in% acinar_cells ~ "Acinar", 
                                                     rownames(.) %in% icaf_cells ~ "iCAF", 
                                                     rownames(.) %in% mycaf_cells ~ "myCAF", 
                                                     rownames(.) %in% apcaf_cells ~ "apCAF", 
@@ -1959,6 +1955,165 @@ Idents(pdac) <- "label_fine"
 Let's generate a plot of the CAF-specific marker genes. First, we'll exclude genes that are highly expressed in any other celltypes. Second, we'll want to exclude any genes highly expressed in macrophages because apCAFs in particular ("ap" = "antigen-presenting") have an immune-like transcriptomic profile. We should have removed those genes in the previous step, but just to make sure we'll pull some macrophage RNA-seq samples and grab their most highly expressed genes. 
 
 ```{r}
+
+FindFilteredMarkers <- function(obj.1 = NULL,                 # the object containing cells we're interested in 
+                                obj.2 = NULL,                 # the reference object to filter against
+                                ident.1 = "seurat_clusters",
+                                ident.2 = "seurat_clusters", 
+                                test.use = "wilcox", 
+                                pval.cutoff = 0.05, 
+                                logfc.cutoff = 0.25, 
+                                quantile.cutoff = 0.9, 
+                                extra.cell.filter = NULL) {
+  Idents(obj.1) <- ident.1
+  Idents(obj.2) <- ident.2
+  DefaultAssay(obj.1) <- "SCT"
+  DefaultAssay(obj.2) <- "SCT"
+  markers <- FindAllMarkers(obj.1, 
+                            logfc.threshold = logfc.cutoff, 
+                            test.use = test.use, 
+                            only.pos = TRUE, 
+                            verbose = FALSE, 
+                            random.seed = 312) %>% 
+             filter(p_val_adj < pval.cutoff)
+  # filter obj.1 cells from obj.2
+  obj.2 <- obj.2[, !rownames(obj.2@meta.data) %in% rownames(obj.1@meta.data)]
+  if (!is.null(extra.cell.filter)) {
+    obj.2 <- obj.2[, !rownames(obj.2@meta.data) %in% extra.cell.filter]
+  }
+  gene_means_by_clust <- t(obj.2@assays$SCT@data) %>% 
+                         as.data.frame() %>% 
+                         mutate(label_fine = obj.2[[ident.2]][, 1]) %>% 
+                         group_by(label_fine) %>% 
+                         summarise(across(where(is.numeric), mean))
+  high_exp_genes <- c()
+  loop_celltypes <- unique(obj.2[[ident.2]][, 1])
+  for (i in loop_celltypes) {
+    top_exp_genes <- gene_means_by_clust %>% 
+                     filter(label_fine == i) %>% 
+                     dplyr::select(-label_fine) %>% 
+                     t() %>% 
+                     as.data.frame() %>% 
+                     filter(V1 > quantile(V1, quantile.cutoff)) %>% 
+                     mutate(gene = rownames(.)) %>% 
+                     pull(gene)
+    high_exp_genes <- c(high_exp_genes, top_exp_genes)
+  }
+  high_exp_genes <- unique(high_exp_genes)
+  markers %<>% filter(!gene %in% high_exp_genes)
+  return(markers)
+}
+
+all_markers <- FindSpecificMarkers(pdac, ident.use = "label_broad", 
+                                   de.method = "wilcox", 
+                                   perc.cutoff = 0.9, 
+                                   log2fc.cutoff = 0.1, 
+                                   fdr.cutoff = 0.05)
+gc()
+caf_markers_test <- FindFilteredMarkers(obj.1 = caf, 
+                                        obj.2 = pdac, 
+                                        ident.1 = "label", 
+                                        ident.2 = "label_fine", 
+                                        test.use = "wilcox",
+                                        pval.cutoff = 0.05, 
+                                        logfc.cutoff = 0.25, 
+                                        quantile.cutoff = 0.9, 
+                                        extra.cell.filter = NULL)
+gc()
+pdac_markers_test <- FindFilteredMarkers(obj.1 = pdac_ductal, 
+                                         obj.2 = pdac, 
+                                         ident.1 = "label", 
+                                         ident.2 = "label_fine", 
+                                         test.use = "wilcox",
+                                         pval.cutoff = 0.05, 
+                                         logfc.cutoff = 0.25, 
+                                         quantile.cutoff = 0.9, 
+                                         extra.cell.filter = NULL)
+gc()
+pdac_broad_markers_test <- FindFilteredMarkers(obj.1 = pdac_ductal, 
+                                               obj.2 = pdac, 
+                                               ident.1 = "label_broad", 
+                                               ident.2 = "label_fine", 
+                                               test.use = "wilcox",
+                                               pval.cutoff = 0.05, 
+                                               logfc.cutoff = 0.25, 
+                                               quantile.cutoff = 0.9, 
+                                               extra.cell.filter = NULL)
+gc()
+ductal_markers_test <- FindFilteredMarkers(obj.1 = ductal, 
+                                           obj.2 = pdac, 
+                                           ident.1 = "label", 
+                                           ident.2 = "label_fine", 
+                                           test.use = "wilcox",
+                                           pval.cutoff = 0.05, 
+                                           logfc.cutoff = 0.25, 
+                                           quantile.cutoff = 0.9, 
+                                           extra.cell.filter = NULL)
+gc()
+nkt_norm_markers_test <- FindFilteredMarkers(obj.1 = nkt_norm, 
+                                             obj.2 = pdac, 
+                                             ident.1 = "label", 
+                                             ident.2 = "label_fine", 
+                                             test.use = "wilcox",
+                                             pval.cutoff = 0.05, 
+                                             logfc.cutoff = 0.25, 
+                                             quantile.cutoff = 0.9, 
+                                             extra.cell.filter = c(cd4t_cells, cd8t_cells, nk_cells, mast_cells, treg_cells, prolif_treg_cells))
+gc()
+myo_tumor_markers_test <- FindFilteredMarkers(obj.1 = myo_tumor, 
+                                              obj.2 = pdac, 
+                                              ident.1 = "label", 
+                                              ident.2 = "label_fine", 
+                                              test.use = "wilcox",
+                                              pval.cutoff = 0.05, 
+                                              logfc.cutoff = 0.25, 
+                                              quantile.cutoff = 0.9, 
+                                              extra.cell.filter = c(res_macro_cells, alt_macro_cells, classic_mono_cells, non_classic_mono_cells, neutrophil_cells, dc_cells))
+gc()
+myo_norm_markers_test <- FindFilteredMarkers(obj.1 = myo_norm, 
+                                             obj.2 = pdac, 
+                                             ident.1 = "label", 
+                                             ident.2 = "label_fine", 
+                                             test.use = "wilcox",
+                                             pval.cutoff = 0.05, 
+                                             logfc.cutoff = 0.25, 
+                                             quantile.cutoff = 0.9, 
+                                             extra.cell.filter = c(res_macro_cells, alt_macro_cells, classic_mono_cells, non_classic_mono_cells, neutrophil_cells, dc_cells))
+gc()
+fibro_markers_test <- FindFilteredMarkers(obj.1 = fibro, 
+                                          obj.2 = pdac, 
+                                          ident.1 = "label", 
+                                          ident.2 = "label_fine", 
+                                          test.use = "wilcox",
+                                          pval.cutoff = 0.05, 
+                                          logfc.cutoff = 0.25, 
+                                          quantile.cutoff = 0.9, 
+                                          extra.cell.filter = NULL)
+gc()
+beepr::beep(sound = "coin")
+wb <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb, sheetName = "Broad_Celltypes")
+openxlsx::writeData(wb, sheet = "Broad_Celltypes", x = all_markers)
+openxlsx::addWorksheet(wb, sheetName = "PDAC_Broad")
+openxlsx::writeData(wb, sheet = "PDAC_Broad", x = pdac_broad_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "PDAC_Fine")
+openxlsx::writeData(wb, sheet = "PDAC_Fine", x = pdac_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "Ductal")
+openxlsx::writeData(wb, sheet = "Ductal", x = (ductal_markers_test %>% filter(cluster %in% c("Acinar", "Lipid Proc.", "Secretory"))))
+openxlsx::addWorksheet(wb, sheetName = "CAF")
+openxlsx::writeData(wb, sheet = "CAF", x = caf_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "Stroma")
+openxlsx::writeData(wb, sheet = "Stroma", x = (fibro_markers_test %>% filter(cluster %in% c("Endothelial", "Perivascular"))))
+openxlsx::addWorksheet(wb, sheetName = "NKT_Tumor")
+openxlsx::writeData(wb, sheet = "NKT_Tumor", x = nkt_tumor_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "NKT_Normal")
+openxlsx::writeData(wb, sheet = "NKT_Normal", x = nkt_norm_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "Myeloid_Tumor")
+openxlsx::writeData(wb, sheet = "Myeloid_Tumor", x = myo_tumor_markers_test)
+openxlsx::addWorksheet(wb, sheetName = "Myeloid_Normal")
+openxlsx::writeData(wb, sheet = "Myeloid_Normal", x = myo_norm_markers_test)
+openxlsx::saveWorkbook(wb, file = "../Data/Gene_Sets/Elyada_Subcluster_Markers_All.xlsx")
+
 DefaultAssay(caf) <- "SCT"
 caf_markers_final <- FindAllMarkers(caf, 
                                     logfc.threshold = 0.25, 
@@ -2191,6 +2346,10 @@ saveRDS(fibro, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_fibro.Rds")
 saveRDS(caf, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_caf.Rds")
 saveRDS(ductal, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_ductal_acinar.Rds")
 saveRDS(pdac_ductal, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_PDAC.Rds")
+saveRDS(nkt_tumor, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_NKT_tumor.Rds")
+saveRDS(nkt_norm, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_NKT_normal.Rds")
+saveRDS(myo_tumor, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_myeloid_tumor.Rds")
+saveRDS(myo_norm, file = "~/Desktop/Data/Tuveson_Seurat_Objs/Elyada_myeloid_normal.Rds")
 ```
 
 ```{r, eval=FALSE, echo=FALSE}
