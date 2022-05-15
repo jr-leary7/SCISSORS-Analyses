@@ -2050,6 +2050,16 @@ ductal_markers_test <- FindFilteredMarkers(obj.1 = ductal,
                                            quantile.cutoff = 0.9, 
                                            extra.cell.filter = NULL)
 gc()
+nkt_tumor_markers_test <- FindFilteredMarkers(obj.1 = nkt_tumor, 
+                                              obj.2 = pdac, 
+                                              ident.1 = "label", 
+                                              ident.2 = "label_fine", 
+                                              test.use = "wilcox",
+                                              pval.cutoff = 0.05, 
+                                              logfc.cutoff = 0.25, 
+                                              quantile.cutoff = 0.9, 
+                                              extra.cell.filter = c(cd4t_cells, cd8t_cells, nk_cells, mast_cells, treg_cells, prolif_treg_cells))
+gc()
 nkt_norm_markers_test <- FindFilteredMarkers(obj.1 = nkt_norm, 
                                              obj.2 = pdac, 
                                              ident.1 = "label", 
@@ -2091,6 +2101,7 @@ fibro_markers_test <- FindFilteredMarkers(obj.1 = fibro,
                                           extra.cell.filter = NULL)
 gc()
 beepr::beep(sound = "coin")
+# save Excel sheet
 wb <- openxlsx::createWorkbook()
 openxlsx::addWorksheet(wb, sheetName = "Broad_Celltypes")
 openxlsx::writeData(wb, sheet = "Broad_Celltypes", x = all_markers)
