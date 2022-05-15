@@ -1955,55 +1955,6 @@ Idents(pdac) <- "label_fine"
 Let's generate a plot of the CAF-specific marker genes. First, we'll exclude genes that are highly expressed in any other celltypes. Second, we'll want to exclude any genes highly expressed in macrophages because apCAFs in particular ("ap" = "antigen-presenting") have an immune-like transcriptomic profile. We should have removed those genes in the previous step, but just to make sure we'll pull some macrophage RNA-seq samples and grab their most highly expressed genes. 
 
 ```{r}
-
-FindFilteredMarkers <- function(obj.1 = NULL,                 # the object containing cells we're interested in 
-                                obj.2 = NULL,                 # the reference object to filter against
-                                ident.1 = "seurat_clusters",
-                                ident.2 = "seurat_clusters", 
-                                test.use = "wilcox", 
-                                pval.cutoff = 0.05, 
-                                logfc.cutoff = 0.25, 
-                                quantile.cutoff = 0.9, 
-                                extra.cell.filter = NULL) {
-  Idents(obj.1) <- ident.1
-  Idents(obj.2) <- ident.2
-  DefaultAssay(obj.1) <- "SCT"
-  DefaultAssay(obj.2) <- "SCT"
-  markers <- FindAllMarkers(obj.1, 
-                            logfc.threshold = logfc.cutoff, 
-                            test.use = test.use, 
-                            only.pos = TRUE, 
-                            verbose = FALSE, 
-                            random.seed = 312) %>% 
-             filter(p_val_adj < pval.cutoff)
-  # filter obj.1 cells from obj.2
-  obj.2 <- obj.2[, !rownames(obj.2@meta.data) %in% rownames(obj.1@meta.data)]
-  if (!is.null(extra.cell.filter)) {
-    obj.2 <- obj.2[, !rownames(obj.2@meta.data) %in% extra.cell.filter]
-  }
-  gene_means_by_clust <- t(obj.2@assays$SCT@data) %>% 
-                         as.data.frame() %>% 
-                         mutate(label_fine = obj.2[[ident.2]][, 1]) %>% 
-                         group_by(label_fine) %>% 
-                         summarise(across(where(is.numeric), mean))
-  high_exp_genes <- c()
-  loop_celltypes <- unique(obj.2[[ident.2]][, 1])
-  for (i in loop_celltypes) {
-    top_exp_genes <- gene_means_by_clust %>% 
-                     filter(label_fine == i) %>% 
-                     dplyr::select(-label_fine) %>% 
-                     t() %>% 
-                     as.data.frame() %>% 
-                     filter(V1 > quantile(V1, quantile.cutoff)) %>% 
-                     mutate(gene = rownames(.)) %>% 
-                     pull(gene)
-    high_exp_genes <- c(high_exp_genes, top_exp_genes)
-  }
-  high_exp_genes <- unique(high_exp_genes)
-  markers %<>% filter(!gene %in% high_exp_genes)
-  return(markers)
-}
-
 all_markers <- FindSpecificMarkers(pdac, ident.use = "label_broad", 
                                    de.method = "wilcox", 
                                    perc.cutoff = 0.9, 
@@ -2124,7 +2075,10 @@ openxlsx::writeData(wb, sheet = "Myeloid_Tumor", x = myo_tumor_markers_test)
 openxlsx::addWorksheet(wb, sheetName = "Myeloid_Normal")
 openxlsx::writeData(wb, sheet = "Myeloid_Normal", x = myo_norm_markers_test)
 openxlsx::saveWorkbook(wb, file = "../Data/Gene_Sets/Elyada_Subcluster_Markers_All.xlsx")
+```
 
+
+```{r}
 DefaultAssay(caf) <- "SCT"
 caf_markers_final <- FindAllMarkers(caf, 
                                     logfc.threshold = 0.25, 
